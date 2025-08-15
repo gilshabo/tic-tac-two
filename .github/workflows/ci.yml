@@ -1,69 +1,101 @@
-name: CI/CD Pipeline
+name: ci-cd
 
 on:
   push:
-    branches: [ main, ci-cd ]
-  pull_request:
     branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write      # push to GHCR
+  id-token: write      # OIDC to cloud in deploy job
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build:
-    name: Build Docker Image
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image:  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Log in to GitHub Container Registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build image
-        run: docker build -t ghcr.io/${{ github.repository }}:latest .
+      - name: Set tags
+        id: meta
+        run: |
+          echo "TAG_SHA=${GITHUB_SHA}" >> $GITHUB_OUTPUT
 
-      - name: Save image as artifact
-        run: docker save ghcr.io/${{ github.repository }}:latest | gzip > image.tar.gz
-
-      - name: Upload image artifact
-        uses: actions/upload-artifact@v4
+      - name: Build & push (build once)
+        id: build
+        uses: docker/build-push-action@v6
         with:
-          name: docker-image
-          path: image.tar.gz
+          push: true
+          context: .
+          platforms: linux/amd64
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.TAG_SHA }}
+          provenance: true
+          sbom: true
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true
+
+      - name: Resolve image digest
+        id: resolve
+        run: |
+          DIGEST=$(jq -r '.[0].digest' <<<"${{ steps.build.outputs.metadata }}")
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
 
   test:
-    name: Run Tests
     runs-on: ubuntu-latest
     needs: build
+    env:
+      APP_IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Download image artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image
-          path: .
+      - name: Show image under test
+        run: echo "$APP_IMAGE"
 
-      - name: Load Docker image
-        run: docker load < image.tar.gz
-
-      - name: Start services for tests
-        run: docker compose -f docker-compose.yml up --abort-on-container-exit --exit-code-from tests
+      - name: Compose up (wait on health)
+        run: |
+          # your compose.test.yml should reference the app image by env-substitution:
+          #   image: ${APP_IMAGE}
+          # and include healthchecks + depends_on: condition: service_healthy
+          APP_IMAGE="$APP_IMAGE" docker compose -f docker-compose.test.yml up --build --wait --remove-orphans
+      - name: Compose down
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v
 
   deploy:
-    name: Deploy to Production
     runs-on: ubuntu-latest
-    needs: test
-    if: github.ref == 'refs/heads/main'
+    needs: [ build, test ]
+    environment: production   # protection rules / approvals
+    env:
+      APP_IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # כאן תוסיף את שלב הדיפלוי שלך (SSH, Kubernetes, AWS וכו')
-      - name: Deploy application
+      # (Example) authenticate to cloud with OIDC (provider-specific step here)
+      # - uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: arn:aws:iam::<acct>:role/<role>
+      #     aws-region: eu-west-1
+
+      - name: Deploy using pinned digest
         run: |
-          echo "Deploying to production..."
-          # ./scripts/deploy.sh או פקודות דיפלוי אחרות
+          echo "Deploying $APP_IMAGE"
+          # kubectl set image ... --image=$APP_IMAGE
+          # or ECS/Knative/Nomad/etc.
