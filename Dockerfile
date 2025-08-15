@@ -2,6 +2,10 @@
 
 # 1) Install prod deps
 FROM node:20-alpine AS deps
+
+# Install netcat for health checks
+RUN apk add --no-cache netcat-openbsd
+
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
