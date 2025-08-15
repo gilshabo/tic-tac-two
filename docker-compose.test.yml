@@ -1,0 +1,49 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  server3001:
+    build: .
+    command: sh -c "PORT=3001 node server/server.js"
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "3001:3001"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "3001"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  server3002:
+    build: .
+    command: sh -c "PORT=3002 node server/server.js"
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "3002:3002"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "3002"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  tests:
+    build: .
+    depends_on:
+      server3001:
+        condition: service_healthy
+      server3002:
+        condition: service_healthy
+    command: sh -c "npm test"
