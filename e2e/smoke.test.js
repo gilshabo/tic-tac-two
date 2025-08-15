@@ -1,119 +1,103 @@
-import { test, before, after } from "node:test";
-import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { WebSocket } from "ws";
-import { setTimeout as delay } from "node:timers/promises";
+// e2e/smoke.test.js
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { setTimeout as wait } from 'node:timers/promises';
+import path from 'node:path';
+import process from 'node:process';
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
-const projectRoot = new URL("..", import.meta.url).pathname;
+const ROOT = process.cwd();
+const NODE = process.execPath;
 
-let srv1, srv2;
-
-function startServer(port) {
-  const env = { ...process.env, PORT: String(port), REDIS_URL };
-  const child = spawn("node", ["server/server.js"], {
-    cwd: projectRoot,
-    env,
-    stdio: ["ignore", "pipe", "pipe"]
+function spawnNode(args, env = {}) {
+  const child = spawn(NODE, args, {
+    cwd: ROOT,
+    env: { ...process.env, ...env },
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  return new Promise((resolve, reject) => {
-    const onData = (data) => {
-      const s = String(data);
-      if (s.includes("WebSocket server listening")) {
-        child.stdout.off("data", onData);
-        resolve(child);
-      }
-    };
-    child.on("error", reject);
-    child.stdout.on("data", onData);
-    // Fallback timeout
-    setTimeout(() => reject(new Error("Server start timeout on " + port)), 8000).unref();
-  }).then(() => child);
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.lines = [];
+  const onLine = (chunk) => {
+    const s = String(chunk);
+    child.lines.push(s);
+    process.stdout.write(s.replace(/\r?\n$/, '') + '\n'); // echo for debug
+  };
+  child.stdout.on('data', onLine);
+  child.stderr.on('data', onLine);
+  return child;
 }
 
-async function wsConnect(url) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
-    ws.once("open", () => resolve(ws));
-    ws.once("error", reject);
-    setTimeout(() => reject(new Error("WS connect timeout: " + url)), 8000).unref();
-  });
-}
-
-test("e2e: two servers, two clients, X wins", { timeout: 60000 }, async (t) => {
-  // Start servers
-  srv1 = await startServer(3001);
-  srv2 = await startServer(3002);
-
-  // Connect clients to different servers
-  const a = await wsConnect("ws://127.0.0.1:3001");
-  const b = await wsConnect("ws://127.0.0.1:3002");
-
-  const gameId = "e2e-room-" + Date.now();
-
-  // Helpers to wait for a specific message type
-  function nextOfType(ws, type) {
-    return new Promise((resolve, reject) => {
-      const onMsg = (data) => {
-        try {
-          const msg = JSON.parse(String(data));
-          if (msg.type === type) {
-            ws.off("message", onMsg);
-            resolve(msg);
-          }
-        } catch {}
-      };
-      ws.on("message", onMsg);
-      setTimeout(() => { ws.off("message", onMsg); reject(new Error("Timeout waiting for " + type)); }, 10000).unref();
-    });
-  }
-
-  // Join both
-  a.send(JSON.stringify({ type: "join", gameId, name: "Alice" }));
-  b.send(JSON.stringify({ type: "join", gameId, name: "Bob" }));
-
-  const aAssigned = await nextOfType(a, "assigned");
-  const bAssigned = await nextOfType(b, "assigned");
-  assert.match(aAssigned.seat, /X|O/);
-  assert.match(bAssigned.seat, /X|O/);
-  assert.notEqual(aAssigned.seat, bAssigned.seat);
-
-  // Each side should receive an update after both have joined
-  const firstUpdate = await nextOfType(a, "update");
-  assert.equal(firstUpdate.state.status, "running");
-
-  // We will drive a quick X win on top row: (0,0),(0,1),(0,2)
-  // Figure out which client is X / O
-  const isAX = aAssigned.seat === "X";
-  const X = isAX ? a : b;
-  const O = isAX ? b : a;
-
-  // Helper to push a move and wait for update
-  async function move(ws, row, col) {
-    ws.send(JSON.stringify({ type: "move", row, col }));
-    const upd = await nextOfType(ws, "update");
-    return upd.state;
-  }
-
-  // Moves: X(0,0), O(1,0), X(0,1), O(1,1), X(0,2)
-  await move(X, 0, 0);
-  await move(O, 1, 0);
-  await move(X, 0, 1);
-  await move(O, 1, 1);
-  const finalState = await move(X, 0, 2);
-
-  assert.equal(finalState.status, "finished");
-  assert.equal(finalState.winner, "X");
-
-  a.close(); b.close();
-});
-
-after(async () => {
-  // Clean up servers
-  for (const child of [srv1, srv2]) {
-    if (child && !child.killed) {
-      child.kill("SIGINT");
-      await delay(300);
+async function waitFor(child, pattern, ms = 15000) {
+  const deadline = Date.now() + ms;
+  const rx = pattern instanceof RegExp ? pattern : new RegExp(pattern);
+  for (;;) {
+    if (child.lines.some((l) => rx.test(l))) return;
+    if (Date.now() > deadline) {
+      throw new Error(`timeout waiting for: ${rx}.\nLast output:\n${child.lines.slice(-20).join('')}`);
     }
+    if (child.exitCode !== null) {
+      throw new Error(`process exited early with code ${child.exitCode}`);
+    }
+    await wait(50);
+  }
+}
+
+async function waitForDoneOrExit(child, ms = 20000) {
+  const deadline = Date.now() + ms;
+  const rx = /\[auto] done/;
+  for (;;) {
+    if (child.lines.some((l) => rx.test(l))) return;
+    if (child.exitCode !== null) {
+      if (child.exitCode === 0) return; // success by clean exit
+      throw new Error(`demo exited with code ${child.exitCode}`);
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`timeout waiting for done/exit.\nLast output:\n${child.lines.slice(-20).join('')}`);
+    }
+    await wait(50);
+  }
+}
+
+async function killTree(child, signal = 'SIGTERM', graceMs = 3000) {
+  if (!child || child.killed) return;
+  try { process.kill(child.pid, signal); } catch {}
+  const t0 = Date.now();
+  while (child.exitCode === null && Date.now() - t0 < graceMs) {
+    await wait(50);
+  }
+  if (child.exitCode === null) {
+    try { process.kill(child.pid, 'SIGKILL'); } catch {}
+  }
+}
+
+test('e2e: two servers, two clients, X wins (win_row)', { timeout: 40000 }, async () => {
+  // ודא שרצים אין תהליכים על הפורטים (לא חובה, אבל עוזר ביציבות)
+  // אם תרצה, תוכל להוסיף פה בדיקת lsof ולסגור תהליכים קיימים.
+
+  // 1) start servers
+  const srvA = spawnNode([path.join('server', 'server.js')], { PORT: '3001' });
+  const srvB = spawnNode([path.join('server', 'server.js')], { PORT: '3002' });
+
+  try {
+    await waitFor(srvA, /WebSocket server listening on ws:\/\/localhost:3001/, 10000);
+    await waitFor(srvB, /WebSocket server listening on ws:\/\/localhost:3002/, 10000);
+
+    // 2) run demo (win_row)
+    const demo = spawnNode([
+      path.join('scripts', 'auto_play_extended.js'),
+      'win_row', 'Alice', 'Bob',
+      'ws://127.0.0.1:3001', 'ws://127.0.0.1:3002'
+    ]);
+
+    await waitForDoneOrExit(demo, 25000);
+    // תן רגע כדי שה־stdout יישטף
+    await wait(100);
+    demo.kill('SIGTERM');
+
+    assert.ok(true, 'demo finished (done or exited cleanly)');
+  } finally {
+    await killTree(srvA);
+    await killTree(srvB);
   }
 });

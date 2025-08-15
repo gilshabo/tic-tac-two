@@ -19,7 +19,8 @@
     "demo:win_col": "node scripts/auto_play_extended.js win_col Alice Bob ws://127.0.0.1:3001 ws://127.0.0.1:3002",
     "demo:win_diag": "node scripts/auto_play_extended.js win_diag Alice Bob ws://127.0.0.1:3001 ws://127.0.0.1:3002",
     "demo:late": "node scripts/auto_play_extended.js late_join Alice Bob ws://127.0.0.1:3001 ws://127.0.0.1:3002",
-    "demo:disconnect": "node scripts/auto_play_extended.js disconnect Alice Bob ws://127.0.0.1:3001 ws://127.0.0.1:3002"
+    "demo:disconnect": "node scripts/auto_play_extended.js disconnect Alice Bob ws://127.0.0.1:3001 ws://127.0.0.1:3002",
+    "start:all": "bash scripts/start_all.sh"
   },
   "dependencies": {
     "redis": "^4.6.14",
