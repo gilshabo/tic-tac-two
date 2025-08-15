@@ -49,10 +49,15 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.TAG_SHA }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},name-canonical=true
+          labels: |
+            org.opencontainers.image.source=${{ github.repository }}
+          metadata: true
 
+          
       - name: Resolve image digest
         id: resolve
         run: |
+          echo "Metadata: ${{ steps.build.outputs.metadata }}"
           DIGEST=$(jq -r '."containerimage.digest"' <<<"${{ steps.build.outputs.metadata }}")
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
 
