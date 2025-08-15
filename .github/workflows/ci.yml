@@ -1,40 +1,69 @@
-name: CI & Deploy
+name: CI/CD Pipeline
 
 on:
   push:
-    branches: ["main"]
+    branches: [ main, ci-cd ]
   pull_request:
+    branches: [ main ]
 
 jobs:
-  test-and-deploy:
+  build:
+    name: Build Docker Image
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Run tests with Docker Compose
-        run: |
-          docker compose up --build --wait tests
-
-      - name: Build production image
-        if: success()
-        run: |
-          docker build -t ghcr.io/${{ github.repository }}:latest .
-
-      # Example: Push to GitHub Container Registry
       - name: Log in to GitHub Container Registry
-        if: success()
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push image
-        if: success()
+      - name: Build image
+        run: docker build -t ghcr.io/${{ github.repository }}:latest .
+
+      - name: Save image as artifact
+        run: docker save ghcr.io/${{ github.repository }}:latest | gzip > image.tar.gz
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: image.tar.gz
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: .
+
+      - name: Load Docker image
+        run: docker load < image.tar.gz
+
+      - name: Start services for tests
+        run: docker compose -f docker-compose.yml up --abort-on-container-exit --exit-code-from tests
+
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # כאן תוסיף את שלב הדיפלוי שלך (SSH, Kubernetes, AWS וכו')
+      - name: Deploy application
         run: |
-          docker push ghcr.io/${{ github.repository }}:latest
+          echo "Deploying to production..."
+          # ./scripts/deploy.sh או פקודות דיפלוי אחרות
