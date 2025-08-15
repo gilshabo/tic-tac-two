@@ -53,8 +53,9 @@ jobs:
       - name: Resolve image digest
         id: resolve
         run: |
-          DIGEST=$(jq -r '.[0].digest' <<<"${{ steps.build.outputs.metadata }}")
+          DIGEST=$(jq -r '."containerimage.digest"' <<<"${{ steps.build.outputs.metadata }}")
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+
 
   test:
     runs-on: ubuntu-latest
