@@ -53,12 +53,36 @@ jobs:
             org.opencontainers.image.source=${{ github.repository }}
           metadata: true
 
-          
+
       - name: Resolve image digest
         id: resolve
         run: |
-          echo "Metadata: ${{ steps.build.outputs.metadata }}"
-          DIGEST=$(jq -r '."containerimage.digest"' <<<"${{ steps.build.outputs.metadata }}")
+          # dump for debug
+          echo "Metadata (raw):"
+          printf '%s\n' "${{ steps.build.outputs.metadata }}"
+          
+          # 1) אם יש output digest רשמי מהשלב build - השתמש בו
+          if [ -n "${{ steps.build.outputs.digest }}" ]; then
+            echo "Found digest output from build step."
+            echo "digest=${{ steps.build.outputs.digest }}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # 2) נסיון למציאת sha256:... בתוך ה-metadata (regardless of JSON)
+          DIGEST=$(printf '%s\n' "${{ steps.build.outputs.metadata }}" | grep -oE 'sha256:[0-9a-f]{64}' | head -n1 || true)
+
+          # 3) גיבוי: נסיון עם jq (אם ה-metadata במקרה כן JSON תקין)
+          if [ -z "$DIGEST" ]; then
+            DIGEST=$(jq -r '."containerimage.digest" // empty' <<<"${{ steps.build.outputs.metadata }}" 2>/dev/null || true)
+          fi
+
+          if [ -z "$DIGEST" ]; then
+            echo "ERROR: could not extract container image digest from build outputs." >&2
+            echo "Please check the build step outputs; here's the raw metadata above." >&2
+            exit 1
+          fi
+
+          echo "Extracted digest: $DIGEST"
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
 
 
