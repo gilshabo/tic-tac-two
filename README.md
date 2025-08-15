@@ -1,6 +1,4 @@
-הנה ה־**README.md** המעודכן, כולל תמיכה בכל מה שדיברנו עליו עד עכשיו:
 
----
 
 # Tic-Tac-Two (Real-Time over Two Servers)
 
@@ -183,6 +181,4 @@ This will:
 
 MIT
 
----
 
-רוצה שאוסיף בסוף ה־README גם **דוגמאות ל־expected console output** לכל אחד מהסנאריואים? זה יעזור בבדיקות האוטומטיות.
