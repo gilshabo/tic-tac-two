@@ -99,13 +99,13 @@ jobs:
 
       - name: Compose up (wait on health)
         run: |
-          APP_IMAGE="$APP_IMAGE" docker compose -f docker-compose.test.yml up --build --wait --remove-orphans || {
+          APP_IMAGE="$APP_IMAGE" docker compose -f docker-compose.yml up --build --wait --remove-orphans || {
             echo "==== docker compose ps ====";
-            docker compose -f docker-compose.test.yml ps;
+            docker compose -f docker-compose.yml ps;
             echo "==== docker compose logs (last 200 lines) ====";
-            docker compose -f docker-compose.test.yml logs --no-color --tail=200;
+            docker compose -f docker-compose.yml logs --no-color --tail=200;
             echo "==== docker inspect exit codes ====";
-            docker compose -f docker-compose.test.yml ps --all --quiet | xargs -r docker inspect --format '{{.Name}} {{.State.ExitCode}} {{.State.Status}}' || true;
+            docker compose -f docker-compose.yml ps --all --quiet | xargs -r docker inspect --format '{{.Name}} {{.State.ExitCode}} {{.State.Status}}' || true;
             exit 1;
           }
 
