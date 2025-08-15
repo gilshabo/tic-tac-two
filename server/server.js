@@ -1,9 +1,5 @@
 /**
- * Tic-Tac-Two server
- * - Handles WebSocket connections
- * - Syncs game state across multiple servers using Redis pub/sub
- * - Modular separation: game logic, protocol, networking
- * - Broadcasts real-time updates to all clients
+ * Tic-Tac-Two server (fixed Redis env + retry)
  */
 
 import { WebSocketServer } from "ws";
@@ -16,28 +12,56 @@ import { C2S, S2C, FED } from "./protocol.js";
  * Env
  */
 const PORT = Number(process.env.PORT || 3001);
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+
+// Prefer explicit REDIS_URL, otherwise build from REDIS_HOST/REDIS_PORT.
+// NOTE: default host is 'redis' so docker-compose service name works.
+const REDIS_HOST = process.env.REDIS_HOST || 'redis';
+const REDIS_PORT = process.env.REDIS_PORT || '6379';
+const REDIS_URL = process.env.REDIS_URL || `redis://${REDIS_HOST}:${REDIS_PORT}`;
+
 const INSTANCE_ID = process.env.INSTANCE_ID || `srv-${PORT}-${randomUUID().slice(0,8)}`;
+
+/**
+ * Helper: connect a redis client with retries/backoff
+ */
+async function connectWithRetry(client, name, maxAttempts = 8) {
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      await client.connect();
+      console.log(`[${INSTANCE_ID}] Connected ${name} to ${REDIS_URL}`);
+      return;
+    } catch (err) {
+      const waitMs = Math.min(500 * (2 ** i), 5000);
+      console.warn(`[${INSTANCE_ID}] Redis connect failed (${name}) attempt ${i+1}/${maxAttempts}: ${err.message}. retrying in ${waitMs}ms`);
+      await new Promise(res => setTimeout(res, waitMs));
+    }
+  }
+  throw new Error(`Could not connect ${name} to Redis at ${REDIS_URL} after ${maxAttempts} attempts`);
+}
 
 /**
  * Redis setup: one client for KV/transactions, one for publish, one for subscribe
  */
 const kv = createClient({ url: REDIS_URL });
+// duplicate() creates clients with same options but not connected yet
 const pub = kv.duplicate();
 const sub = kv.duplicate();
-await kv.connect();
-await pub.connect();
-await sub.connect();
 
-/**
- * In-memory maps for local clients
- */
+try {
+  // connect primary then duplicates (duplicates use same options)
+  await connectWithRetry(kv, 'kv');
+  await connectWithRetry(pub, 'pub');
+  await connectWithRetry(sub, 'sub');
+} catch (e) {
+  console.error(`[${INSTANCE_ID}] Fatal: unable to connect to Redis — exiting.`, e);
+  // Optional: process.exit(1) will cause container to exit (compose will show logs)
+  process.exit(1);
+}
+
+/* rest of your original code unchanged */
 const clientsByGame = new Map();  // gameId -> Set<ws>
 const clientMeta = new Map();     // ws -> { gameId, seat, playerId, name }
 
-/**
- * Helpers
- */
 function gameKey(gameId) { return `tictac:game:${gameId}`; }
 function chan(gameId)   { return `tictac:chan:${gameId}`; }
 
@@ -72,10 +96,6 @@ function safeSend(ws, obj) {
   try { ws.send(JSON.stringify(obj)); } catch {}
 }
 
-/**
- * Subscribe to all game channels lazily: when we first see a gameId, we subscribe its channel
- * We cache subscriptions to avoid duplicate sub.subscribe()
- */
 const subscribedGames = new Set();
 async function ensureSubscribed(gameId) {
   if (subscribedGames.has(gameId)) return;
@@ -85,9 +105,7 @@ async function ensureSubscribed(gameId) {
       const envelope = JSON.parse(message);
       if (envelope.type !== FED.STATE) return;
       const { state, originId } = envelope;
-      // Ignore messages we just published ourselves
       if (originId === INSTANCE_ID) return;
-      // Update local and broadcast to connected clients
       broadcastLocal(state.gameId, { type: S2C.UPDATE, state });
     } catch (e) {
       console.error("Failed to process pubsub message:", e);
@@ -95,9 +113,6 @@ async function ensureSubscribed(gameId) {
   });
 }
 
-/**
- * WebSocket server
- */
 const wss = new WebSocketServer({ port: PORT }, () => {
   console.log(`[${INSTANCE_ID}] WebSocket server listening on ws://localhost:${PORT}`);
 });
@@ -114,15 +129,11 @@ wss.on("connection", (ws) => {
       await ensureSubscribed(gameId);
       ensureGameSet(gameId).add(ws);
 
-      // Load or init state
       let st = await loadState(gameId);
       if (!st) st = initialState(gameId);
 
-      // Assign seat if needed
       let seatToYou;
       try {
-        // Optimistic concurrency using WATCH/MULTI
-        // Retry a couple of times if races
         for (let attempt = 0; attempt < 5; attempt++) {
           await kv.watch(gameKey(gameId));
           const currentRaw = await kv.get(gameKey(gameId));
@@ -131,30 +142,25 @@ wss.on("connection", (ws) => {
             await kv.unwatch();
             return safeSend(ws, { type: S2C.ERROR, message: "Game already finished" });
           }
-          // Determine if seat needed
           if (current.players.X && current.players.O) {
             seatToYou = (current.players.X.name === name) ? "X" :
                         (current.players.O.name === name) ? "O" : null;
-            // No seat free; allow spectator? Here we disallow extra players.
             if (!seatToYou) {
               await kv.unwatch();
               return safeSend(ws, { type: S2C.ERROR, message: "Game already has two players" });
             }
           } else {
-            // Assign a seat to this player
             const playerInfo = { id: randomUUID(), name };
             const next = assignSeat(current, playerInfo);
             seatToYou = (next.players.O && next.players.O.name === name) ? "O" : "X";
 
             const tx = kv.multi().set(gameKey(gameId), JSON.stringify(next));
             const res = await tx.exec();
-            if (res === null) { continue; } // race, retry
-            // Publish new state
+            if (res === null) { continue; }
             await saveStateAndPublish(next);
             current = next;
           }
 
-          // Join successful (either existing seat or newly assigned). Broadcast current state to this client.
           clientMeta.set(ws, { gameId, seat: seatToYou, playerId: null, name });
           safeSend(ws, { type: S2C.ASSIGNED, seat: seatToYou, you: { name } });
           safeSend(ws, { type: S2C.UPDATE, state: current });
@@ -172,7 +178,6 @@ wss.on("connection", (ws) => {
       const { row, col } = msg;
       const { gameId, seat } = meta;
 
-      // CAS with WATCH/MULTI to avoid concurrent move conflicts
       try {
         for (let attempt = 0; attempt < 8; attempt++) {
           await kv.watch(gameKey(gameId));
@@ -188,11 +193,7 @@ wss.on("connection", (ws) => {
           }
           const tx = kv.multi().set(gameKey(gameId), JSON.stringify(next));
           const res = await tx.exec();
-          if (res === null) {
-            // Conflict; retry
-            continue;
-          }
-          // Successful write; publish and broadcast locally too
+          if (res === null) { continue; }
           await saveStateAndPublish(next);
           broadcastLocal(gameId, { type: S2C.UPDATE, state: next });
           return;
